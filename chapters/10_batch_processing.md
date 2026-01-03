@@ -572,34 +572,81 @@ world of big data
                     world: 2
 ```
 
-**MapReduce Code (Python with MRJob):**
+**MapReduce Code (JavaScript with Hadoop Streaming):**
 
-```python
-from mrjob.job import MRJob
+```javascript
+// mapper.js
+process.stdin.setEncoding('utf8');
 
-class WordCount(MRJob):
-    
-    def mapper(self, _, line):
-        """Map phase: emit (word, 1) for each word"""
-        for word in line.split():
-            yield (word.lower(), 1)
-    
-    def reducer(self, key, values):
-        """Reduce phase: sum counts for each word"""
-        yield (key, sum(values))
+let buffer = '';
+process.stdin.on('data', (chunk) => {
+  buffer += chunk;
+  const lines = buffer.split('\n');
+  buffer = lines.pop(); // Keep incomplete line
+  
+  lines.forEach(line => {
+    const words = line.split(/\s+/);
+    words.forEach(word => {
+      if (word) {
+        // Emit (word, 1) for each word
+        console.log(`${word.toLowerCase()}\t1`);
+      }
+    });
+  });
+});
 
-if __name__ == '__main__':
-    WordCount.run()
+process.stdin.on('end', () => {
+  if (buffer) {
+    buffer.split(/\s+/).forEach(word => {
+      if (word) console.log(`${word.toLowerCase()}\t1`);
+    });
+  }
+});
+
+// reducer.js
+const readline = require('readline');
+const rl = readline.createInterface({
+  input: process.stdin,
+  output: process.stdout,
+  terminal: false
+});
+
+let currentWord = null;
+let currentCount = 0;
+
+rl.on('line', (line) => {
+  const [word, count] = line.split('\t');
+  
+  if (word === currentWord) {
+    currentCount += parseInt(count);
+  } else {
+    if (currentWord) {
+      console.log(`${currentWord}\t${currentCount}`);
+    }
+    currentWord = word;
+    currentCount = parseInt(count);
+  }
+});
+
+rl.on('close', () => {
+  if (currentWord) {
+    console.log(`${currentWord}\t${currentCount}`);
+  }
+});
 ```
 
 **Run locally:**
 ```bash
-python word_count.py input.txt
+cat input.txt | node mapper.js | sort | node reducer.js
 ```
 
 **Run on Hadoop:**
 ```bash
-python word_count.py -r hadoop hdfs:///input/*.txt
+hadoop jar hadoop-streaming.jar \
+  -input hdfs:///input/*.txt \
+  -output hdfs:///output \
+  -mapper "node mapper.js" \
+  -reducer "node reducer.js"
 ```
 
 ### MapReduce Input Flexibility
@@ -1201,20 +1248,67 @@ This **speculative execution** prevents a single slow machine from bottlenecking
 
 **Solution**: Run a local reduce before shuffle.
 
-```python
-class WordCountOptimized(MRJob):
-    
-    def mapper(self, _, line):
-        for word in line.split():
-            yield (word.lower(), 1)
-    
-    def combiner(self, key, values):
-        """Local aggregation (runs on map node)"""
-        yield (key, sum(values))
-    
-    def reducer(self, key, values):
-        """Final aggregation"""
-        yield (key, sum(values))
+```javascript
+// mapper.js with combiner
+const localCounts = new Map();
+
+process.stdin.setEncoding('utf8');
+let buffer = '';
+
+process.stdin.on('data', (chunk) => {
+  buffer += chunk;
+  const lines = buffer.split('\n');
+  buffer = lines.pop();
+  
+  lines.forEach(line => {
+    const words = line.split(/\s+/);
+    words.forEach(word => {
+      if (word) {
+        const key = word.toLowerCase();
+        localCounts.set(key, (localCounts.get(key) || 0) + 1);
+      }
+    });
+  });
+});
+
+process.stdin.on('end', () => {
+  if (buffer) {
+    buffer.split(/\s+/).forEach(word => {
+      if (word) {
+        const key = word.toLowerCase();
+        localCounts.set(key, (localCounts.get(key) || 0) + 1);
+      }
+    });
+  }
+  
+  // Combiner: emit local aggregates
+  for (const [word, count] of localCounts.entries()) {
+    console.log(`${word}\t${count}`);
+  }
+});
+
+// reducer.js (same as before)
+const readline = require('readline');
+const rl = readline.createInterface({ input: process.stdin });
+
+let currentWord = null;
+let currentCount = 0;
+
+rl.on('line', (line) => {
+  const [word, count] = line.split('\t');
+  
+  if (word === currentWord) {
+    currentCount += parseInt(count);
+  } else {
+    if (currentWord) console.log(`${currentWord}\t${currentCount}`);
+    currentWord = word;
+    currentCount = parseInt(count);
+  }
+});
+
+rl.on('close', () => {
+  if (currentWord) console.log(`${currentWord}\t${currentCount}`);
+});
 ```
 
 **Without combiner:**
@@ -1469,24 +1563,26 @@ Modern systems like Spark provide the best of both worlds: high-level APIs (Data
 
 **Core Abstraction: RDD (Resilient Distributed Dataset)**
 
-```python
-from pyspark import SparkContext
+```javascript
+// Using Apache Spark with Node.js binding (eclairjs)
+const spark = require('eclairjs');
 
-sc = SparkContext("local", "WordCount")
+const sc = new spark.SparkContext("local", "WordCount");
 
-# Read input
-lines = sc.textFile("input.txt")
+// Read input
+const lines = sc.textFile("input.txt");
 
-# Transformations (lazy)
-words = lines.flatMap(lambda line: line.split())
-word_pairs = words.map(lambda word: (word, 1))
-word_counts = word_pairs.reduceByKey(lambda a, b: a + b)
+// Transformations (lazy)
+const words = lines.flatMap(line => line.split(/\s+/));
+const wordPairs = words.map(word => [word, 1]);
+const wordCounts = wordPairs.reduceByKey((a, b) => a + b);
 
-# Action (triggers execution)
-results = word_counts.collect()
-
-for word, count in results:
-    print(f"{word}: {count}")
+// Action (triggers execution)
+wordCounts.collect().then(results => {
+  results.forEach(([word, count]) => {
+    console.log(`${word}: ${count}`);
+  });
+});
 ```
 
 **RDD Operations:**
@@ -1534,34 +1630,37 @@ for word, count in results:
 
 **DataFrame**: Structured data with named columns (like SQL table).
 
-```python
-from pyspark.sql import SparkSession
+```javascript
+const spark = require('eclairjs');
 
-spark = SparkSession.builder.appName("Example").getOrCreate()
+const sparkSession = spark.sql.SparkSession
+  .builder()
+  .appName("Example")
+  .getOrCreate();
 
-# Read JSON data
-users = spark.read.json("users.json")
+// Read JSON data
+const users = sparkSession.read().json("users.json");
 
-# Schema
-users.printSchema()
-# root
-#  |-- name: string
-#  |-- age: long
-#  |-- email: string
+// Schema
+users.printSchema();
+// root
+//  |-- name: string
+//  |-- age: long
+//  |-- email: string
 
-# SQL-like operations
-users.select("name", "age").show()
+// SQL-like operations
+users.select("name", "age").show();
 
-# Filter
-adults = users.filter(users.age >= 18)
+// Filter
+const adults = users.filter(users.col("age").geq(18));
 
-# Group by and aggregate
-age_groups = users.groupBy("age").count()
+// Group by and aggregate
+const ageGroups = users.groupBy("age").count();
 
-# SQL queries
-users.createOrReplaceTempView("users")
-result = spark.sql("SELECT age, COUNT(*) FROM users GROUP BY age")
-result.show()
+// SQL queries
+users.createOrReplaceTempView("users");
+const result = sparkSession.sql("SELECT age, COUNT(*) FROM users GROUP BY age");
+result.show();
 ```
 
 **Optimizations (Catalyst Optimizer):**
@@ -1593,26 +1692,27 @@ Optimizations:
 
 **Batch Processing with Flink:**
 
-```python
-from flink import ExecutionEnvironment
+```javascript
+// Using Apache Flink Node.js API
+const flink = require('flink');
 
-env = ExecutionEnvironment.get_execution_environment()
+const env = flink.ExecutionEnvironment.getExecutionEnvironment();
 
-# Read input
-lines = env.read_text_file("input.txt")
+// Read input
+const lines = env.readTextFile("input.txt");
 
-# Word count
-word_counts = lines \
-    .flat_map(lambda line: line.split()) \
-    .map(lambda word: (word, 1)) \
-    .group_by(0) \
-    .reduce(lambda a, b: (a[0], a[1] + b[1]))
+// Word count
+const wordCounts = lines
+  .flatMap(line => line.split(/\s+/))
+  .map(word => [word, 1])
+  .groupBy(0)
+  .reduce((a, b) => [a[0], a[1] + b[1]]);
 
-# Write output
-word_counts.write_text("output.txt")
+// Write output
+wordCounts.writeAsText("output.txt");
 
-# Execute
-env.execute("Batch Word Count")
+// Execute
+env.execute("Batch Word Count");
 ```
 
 ## Part 4: Joins in Batch Processing
@@ -1710,33 +1810,62 @@ Reducer 2 (user_id=2):
 
 **MapReduce Implementation:**
 
-```python
-class JoinMapper(MRJob):
-    
-    def mapper(self, _, line):
-        """Emit (user_id, record) for both datasets"""
-        parts = line.split(',')
-        if len(parts) == 2:  # User record
-            user_id, name = parts
-            yield (user_id, ('USER', name))
-        elif len(parts) == 3:  # Purchase record
-            purchase_id, user_id, amount = parts
-            yield (user_id, ('PURCHASE', purchase_id, amount))
-    
-    def reducer(self, user_id, records):
-        """Join records with same user_id"""
-        user_name = None
-        purchases = []
-        
-        for record in records:
-            if record[0] == 'USER':
-                user_name = record[1]
-            else:  # PURCHASE
-                purchases.append(record[1:])
-        
-        # Emit joined records
-        for purchase_id, amount in purchases:
-            yield (user_id, f"{user_name},{purchase_id},{amount}")
+```javascript
+// mapper.js
+const readline = require('readline');
+const rl = readline.createInterface({ input: process.stdin });
+
+rl.on('line', (line) => {
+  const parts = line.split(',');
+  
+  if (parts.length === 2) {
+    // User record
+    const [userId, name] = parts;
+    console.log(`${userId}\tUSER\t${name}`);
+  } else if (parts.length === 3) {
+    // Purchase record
+    const [purchaseId, userId, amount] = parts;
+    console.log(`${userId}\tPURCHASE\t${purchaseId}\t${amount}`);
+  }
+});
+
+// reducer.js
+const readline = require('readline');
+const rl = readline.createInterface({ input: process.stdin });
+
+let currentUserId = null;
+let userName = null;
+const purchases = [];
+
+function emitJoined() {
+  if (userName && purchases.length > 0) {
+    purchases.forEach(([purchaseId, amount]) => {
+      console.log(`${currentUserId}\t${userName},${purchaseId},${amount}`);
+    });
+  }
+}
+
+rl.on('line', (line) => {
+  const parts = line.split('\t');
+  const [userId, type] = parts;
+  
+  if (userId !== currentUserId) {
+    emitJoined();
+    currentUserId = userId;
+    userName = null;
+    purchases.length = 0;
+  }
+  
+  if (type === 'USER') {
+    userName = parts[2];
+  } else if (type === 'PURCHASE') {
+    purchases.push([parts[2], parts[3]]);
+  }
+});
+
+rl.on('close', () => {
+  emitJoined();
+});
 ```
 
 **Execution Flow:**
@@ -1837,27 +1966,31 @@ Final output is already joined.
 
 **Code Implementation:**
 
-```python
-class BroadcastJoin(MRJob):
-    
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.users = {}  # Load small table into memory
-    
-    def mapper_init(self):
-        """Load user data (small table) into memory"""
-        with open('users.txt') as f:
-            for line in f:
-                user_id, name = line.strip().split(',')
-                self.users[user_id] = name
-    
-    def mapper(self, _, line):
-        """Join on the fly (no shuffle needed!)"""
-        purchase_id, user_id, amount = line.split(',')
-        user_name = self.users.get(user_id, 'Unknown')
-        yield (user_id, f"{user_name},{purchase_id},{amount}")
-    
-    # No reducer needed!
+```javascript
+// mapper.js with broadcast join
+const fs = require('fs');
+const readline = require('readline');
+
+// Load small table into memory (broadcast)
+const users = new Map();
+const userFile = fs.readFileSync('users.txt', 'utf-8');
+userFile.split('\n').forEach(line => {
+  if (line) {
+    const [userId, name] = line.split(',');
+    users.set(userId, name);
+  }
+});
+
+// Process large table and join on-the-fly
+const rl = readline.createInterface({ input: process.stdin });
+
+rl.on('line', (line) => {
+  const [purchaseId, userId, amount] = line.split(',');
+  const userName = users.get(userId) || 'Unknown';
+  
+  // Emit joined record (no reducer needed!)
+  console.log(`${userId}\t${userName},${purchaseId},${amount}`);
+});
 ```
 
 **Performance Comparison:**
@@ -1987,15 +2120,15 @@ Now the hot key is processed by 10 reducers in parallel instead of one!
 
 ### Basic Aggregation
 
-```python
-# Spark example: Average purchase by user
-purchases = spark.read.csv("purchases.csv")
+```javascript
+// Spark example: Average purchase by user
+const purchases = sparkSession.read().csv("purchases.csv");
 
-avg_per_user = purchases \
-    .groupBy("user_id") \
-    .agg({"amount": "avg"})
+const avgPerUser = purchases
+  .groupBy("user_id")
+  .agg({"amount": "avg"});
 
-avg_per_user.show()
+avgPerUser.show();
 ```
 
 **Execution:**
@@ -2018,22 +2151,27 @@ After agg (avg):
 
 **Window functions** compute over a sliding window.
 
-```python
-from pyspark.sql.window import Window
-from pyspark.sql.functions import row_number, rank, avg
+```javascript
+const { Window } = spark.sql.window;
+const { functions: F } = spark.sql;
 
-# Rank products by sales within each category
-window = Window.partitionBy("category").orderBy(desc("sales"))
+// Rank products by sales within each category
+const window = Window
+  .partitionBy("category")
+  .orderBy(F.col("sales").desc());
 
-ranked = products \
-    .withColumn("rank", row_number().over(window)) \
-    .filter(col("rank") <= 10)  # Top 10 per category
+const ranked = products
+  .withColumn("rank", F.row_number().over(window))
+  .filter(F.col("rank").leq(10));  // Top 10 per category
 
-# Moving average
-window = Window.partitionBy("user_id").orderBy("date").rowsBetween(-7, 0)
+// Moving average
+const window2 = Window
+  .partitionBy("user_id")
+  .orderBy("date")
+  .rowsBetween(-7, 0);
 
-moving_avg = purchases \
-    .withColumn("avg_7d", avg("amount").over(window))
+const movingAvg = purchases
+  .withColumn("avg_7d", F.avg("amount").over(window2));
 ```
 
 ## Part 6: Handling Data Skew
@@ -2058,35 +2196,40 @@ Time: 30 minutes (3x slower!)
 
 **1. Salting (for joins)**
 
-```python
-def skew_resistant_join(large_df, small_df):
-    """Add salt to distribute skewed keys"""
-    # Replicate small df with salts
-    salts = [i for i in range(10)]
-    small_df_salted = small_df \
-        .withColumn("salt", explode(array([lit(s) for s in salts]))) \
-        .withColumn("join_key_salted", concat(col("join_key"), lit("_"), col("salt")))
-    
-    # Add salt to large df
-    large_df_salted = large_df \
-        .withColumn("salt", (rand() * 10).cast("int")) \
-        .withColumn("join_key_salted", concat(col("join_key"), lit("_"), col("salt")))
-    
-    # Join on salted key
-    result = large_df_salted.join(small_df_salted, "join_key_salted")
-    
-    return result
+```javascript
+function skewResistantJoin(largeDf, smallDf) {
+  // Add salt to distribute skewed keys
+  const { functions: F } = spark.sql;
+  
+  // Replicate small df with salts
+  const salts = Array.from({length: 10}, (_, i) => i);
+  const smallDfSalted = smallDf
+    .withColumn("salt", F.explode(F.array(salts.map(s => F.lit(s)))))
+    .withColumn("join_key_salted", 
+      F.concat(F.col("join_key"), F.lit("_"), F.col("salt")));
+  
+  // Add salt to large df
+  const largeDfSalted = largeDf
+    .withColumn("salt", F.rand().multiply(10).cast("int"))
+    .withColumn("join_key_salted", 
+      F.concat(F.col("join_key"), F.lit("_"), F.col("salt")));
+  
+  // Join on salted key
+  const result = largeDfSalted.join(smallDfSalted, "join_key_salted");
+  
+  return result;
+}
 ```
 
 **2. Adaptive Query Execution (Spark 3.0+)**
 
 Spark automatically detects and handles skew:
 
-```python
-spark.conf.set("spark.sql.adaptive.enabled", "true")
-spark.conf.set("spark.sql.adaptive.skewJoin.enabled", "true")
+```javascript
+sparkSession.conf().set("spark.sql.adaptive.enabled", "true");
+sparkSession.conf().set("spark.sql.adaptive.skewJoin.enabled", "true");
 
-# Spark will automatically split skewed partitions!
+// Spark will automatically split skewed partitions!
 ```
 
 ## Part 7: Workflows and Dependencies
@@ -2133,80 +2276,79 @@ Example: E-commerce analytics pipeline
 
 **DAG (Directed Acyclic Graph) Definition:**
 
-```python
-from airflow import DAG
-from airflow.operators.bash import BashOperator
-from airflow.operators.python import PythonOperator
-from datetime import datetime, timedelta
+```javascript
+// Using Airflow with Node.js (conceptual example)
+const { DAG, BashOperator, PythonOperator } = require('apache-airflow');
 
-default_args = {
-    'owner': 'data-team',
-    'depends_on_past': False,
-    'start_date': datetime(2024, 1, 1),
-    'retries': 3,
-    'retry_delay': timedelta(minutes=5),
-}
+const defaultArgs = {
+  owner: 'data-team',
+  depends_on_past: false,
+  start_date: new Date('2024-01-01'),
+  retries: 3,
+  retry_delay: 5 * 60 * 1000, // 5 minutes in ms
+};
 
-dag = DAG(
-    'ecommerce_analytics',
-    default_args=default_args,
-    schedule_interval='@daily',  # Run once per day
-    catchup=False
-)
+const dag = new DAG('ecommerce_analytics', {
+  default_args: defaultArgs,
+  schedule_interval: '@daily',  // Run once per day
+  catchup: false
+});
 
-# Task 1: Parse raw logs
-parse_clicks = BashOperator(
-    task_id='parse_clicks',
-    bash_command='spark-submit parse_clicks.py --date {{ ds }}',
-    dag=dag
-)
+// Task 1: Parse raw logs
+const parseClicks = new BashOperator({
+  task_id: 'parse_clicks',
+  bash_command: 'spark-submit parse_clicks.py --date {{ ds }}',
+  dag: dag
+});
 
-parse_purchases = BashOperator(
-    task_id='parse_purchases',
-    bash_command='spark-submit parse_purchases.py --date {{ ds }}',
-    dag=dag
-)
+const parsePurchases = new BashOperator({
+  task_id: 'parse_purchases',
+  bash_command: 'spark-submit parse_purchases.py --date {{ ds }}',
+  dag: dag
+});
 
-parse_users = BashOperator(
-    task_id='parse_users',
-    bash_command='spark-submit parse_users.py --date {{ ds }}',
-    dag=dag
-)
+const parseUsers = new BashOperator({
+  task_id: 'parse_users',
+  bash_command: 'spark-submit parse_users.py --date {{ ds }}',
+  dag: dag
+});
 
-# Task 2: Join data
-join_data = BashOperator(
-    task_id='join_data',
-    bash_command='spark-submit join_data.py --date {{ ds }}',
-    dag=dag
-)
+// Task 2: Join data
+const joinData = new BashOperator({
+  task_id: 'join_data',
+  bash_command: 'spark-submit join_data.py --date {{ ds }}',
+  dag: dag
+});
 
-# Task 3: Compute aggregates
-compute_cohorts = PythonOperator(
-    task_id='compute_cohorts',
-    python_callable=compute_user_cohorts,
-    dag=dag
-)
+// Task 3: Compute aggregates
+const computeCohorts = new PythonOperator({
+  task_id: 'compute_cohorts',
+  python_callable: computeUserCohorts,
+  dag: dag
+});
 
-rank_products = PythonOperator(
-    task_id='rank_products',
-    python_callable=rank_products_by_sales,
-    dag=dag
-)
+const rankProducts = new PythonOperator({
+  task_id: 'rank_products',
+  python_callable: rankProductsBySales,
+  dag: dag
+});
 
-# Task 4: Export results
-export_to_db = BashOperator(
-    task_id='export_to_db',
-    bash_command='python export.py --date {{ ds }}',
-    dag=dag
-)
+// Task 4: Export results
+const exportToDb = new BashOperator({
+  task_id: 'export_to_db',
+  bash_command: 'node export.js --date {{ ds }}',
+  dag: dag
+});
 
-# Define dependencies
-parse_clicks >> join_data
-parse_purchases >> join_data
-parse_users >> join_data
+// Define dependencies
+parseClicks.setDownstream(joinData);
+parsePurchases.setDownstream(joinData);
+parseUsers.setDownstream(joinData);
 
-join_data >> compute_cohorts >> export_to_db
-join_data >> rank_products >> export_to_db
+joinData.setDownstream(computeCohorts);
+joinData.setDownstream(rankProducts);
+computeCohorts.setDownstream(exportToDb);
+rankProducts.setDownstream(exportToDb);
 ```
 
 **Airflow UI:**
@@ -2232,42 +2374,91 @@ DAG View:
 
 ### Luigi (Alternative to Airflow)
 
-```python
-import luigi
+```javascript
+// Using Luigi-like workflow in Node.js
+const fs = require('fs').promises;
+const path = require('path');
 
-class ParseClicks(luigi.Task):
-    date = luigi.DateParameter()
-    
-    def output(self):
-        return luigi.LocalTarget(f'data/clicks_{self.date}.parquet')
-    
-    def run(self):
-        # Parse logs
-        parsed = parse_click_logs(self.date)
-        parsed.to_parquet(self.output().path)
+class Task {
+  constructor(date) {
+    this.date = date;
+  }
+  
+  async run() {
+    throw new Error('Must implement run()');
+  }
+  
+  output() {
+    throw new Error('Must implement output()');
+  }
+  
+  requires() {
+    return [];
+  }
+}
 
-class JoinData(luigi.Task):
-    date = luigi.DateParameter()
+class ParseClicks extends Task {
+  output() {
+    return `data/clicks_${this.date}.parquet`;
+  }
+  
+  async run() {
+    // Parse logs
+    const parsed = await parseClickLogs(this.date);
+    await saveAsParquet(parsed, this.output());
+  }
+}
+
+class JoinData extends Task {
+  requires() {
+    return [
+      new ParseClicks(this.date),
+      new ParsePurchases(this.date),
+      new ParseUsers(this.date)
+    ];
+  }
+  
+  output() {
+    return `data/joined_${this.date}.parquet`;
+  }
+  
+  async run() {
+    // Load inputs
+    const inputs = this.requires().map(task => task.output());
+    const [clicks, purchases, users] = await Promise.all(
+      inputs.map(path => loadParquet(path))
+    );
     
-    def requires(self):
-        return [
-            ParseClicks(self.date),
-            ParsePurchases(self.date),
-            ParseUsers(self.date)
-        ]
-    
-    def output(self):
-        return luigi.LocalTarget(f'data/joined_{self.date}.parquet')
-    
-    def run(self):
-        # Load inputs
-        clicks = pd.read_parquet(self.input()[0].path)
-        purchases = pd.read_parquet(self.input()[1].path)
-        users = pd.read_parquet(self.input()[2].path)
-        
-        # Join
-        joined = join_all_data(clicks, purchases, users)
-        joined.to_parquet(self.output().path)
+    // Join
+    const joined = joinAllData(clicks, purchases, users);
+    await saveAsParquet(joined, this.output());
+  }
+}
+
+// Workflow executor
+async function executeTask(task) {
+  // Check if output exists
+  try {
+    await fs.access(task.output());
+    console.log(`Task ${task.constructor.name} already complete`);
+    return;
+  } catch {
+    // Output doesn't exist, need to run
+  }
+  
+  // Execute dependencies first
+  const deps = task.requires();
+  await Promise.all(deps.map(dep => executeTask(dep)));
+  
+  // Run task
+  console.log(`Running ${task.constructor.name}...`);
+  await task.run();
+  console.log(`Task ${task.constructor.name} complete`);
+}
+
+// Execute workflow
+const finalTask = new JoinData('2024-01-15');
+executeTask(finalTask);
 ```
 
 ## Part 8: Fault Tolerance in Batch Processing
@@ -2299,30 +2490,30 @@ If task is slow (straggler):
 
 **RDD Lineage**: Remember how RDD was computed.
 
-```python
-# Original RDD
-lines = sc.textFile("input.txt")
+```javascript
+// Original RDD
+const lines = sc.textFile("input.txt");
 
-# Transformation creates lineage
-words = lines.flatMap(lambda line: line.split())
-pairs = words.map(lambda word: (word, 1))
-counts = pairs.reduceByKey(lambda a, b: a + b)
+// Transformation creates lineage
+const words = lines.flatMap(line => line.split(/\s+/));
+const pairs = words.map(word => [word, 1]);
+const counts = pairs.reduceByKey((a, b) => a + b);
 
-# Lineage graph:
-#   input.txt → lines → words → pairs → counts
+// Lineage graph:
+//   input.txt → lines → words → pairs → counts
 
-# If partition of 'counts' is lost:
-#   → Recompute from input using lineage
+// If partition of 'counts' is lost:
+//   → Recompute from input using lineage
 ```
 
 **Checkpointing**: Save RDD to disk periodically.
 
-```python
-# Checkpoint after expensive computation
-pairs.checkpoint()
+```javascript
+// Checkpoint after expensive computation
+pairs.checkpoint();
 
-# If failure occurs after checkpoint:
-#   → Recover from checkpoint (faster than recomputing)
+// If failure occurs after checkpoint:
+//   → Recover from checkpoint (faster than recomputing)
 ```
 
 ## Part 9: Real-World Case Studies
@@ -2345,76 +2536,84 @@ pairs.checkpoint()
 
 **Spark Job:**
 
-```python
-# Load data
-views = spark.read.parquet("s3://netflix-data/views/")
-ratings = spark.read.parquet("s3://netflix-data/ratings/")
+```javascript
+// Load data
+const views = sparkSession.read().parquet("s3://netflix-data/views/");
+const ratings = sparkSession.read().parquet("s3://netflix-data/ratings/");
 
-# Collaborative filtering (ALS)
-from pyspark.ml.recommendation import ALS
+// Collaborative filtering (ALS)
+const { ALS } = spark.ml.recommendation;
 
-als = ALS(
-    userCol="user_id",
-    itemCol="movie_id",
-    ratingCol="rating",
-    coldStartStrategy="drop"
-)
+const als = new ALS({
+  userCol: "user_id",
+  itemCol: "movie_id",
+  ratingCol: "rating",
+  coldStartStrategy: "drop"
+});
 
-model = als.fit(ratings)
+const model = als.fit(ratings);
 
-# Generate recommendations
-users = ratings.select("user_id").distinct()
-recommendations = model.recommendForUserSubset(users, 50)
+// Generate recommendations
+const users = ratings.select("user_id").distinct();
+const recommendations = model.recommendForUserSubset(users, 50);
 
-# Save to Cassandra
-recommendations.write \
-    .format("org.apache.spark.sql.cassandra") \
-    .options(table="recommendations", keyspace="netflix") \
-    .mode("overwrite") \
-    .save()
+// Save to Cassandra
+recommendations.write()
+  .format("org.apache.spark.sql.cassandra")
+  .options({
+    table: "recommendations",
+    keyspace: "netflix"
+  })
+  .mode("overwrite")
+  .save();
 ```
 
 ### Case Study 2: Spotify User Segmentation
 
 **Goal**: Cluster users based on listening behavior.
 
-```python
-# Feature engineering
-user_features = spark.sql("""
-    SELECT 
-        user_id,
-        COUNT(DISTINCT artist) as artist_diversity,
-        COUNT(*) as total_plays,
-        AVG(song_duration) as avg_song_duration,
-        COUNT(DISTINCT CAST(play_time AS DATE)) as days_active,
-        SUM(CASE WHEN hour(play_time) BETWEEN 22 AND 6 THEN 1 ELSE 0 END) as night_plays
-    FROM listening_history
-    WHERE date >= current_date() - INTERVAL 30 DAYS
-    GROUP BY user_id
-""")
+```javascript
+// Feature engineering
+const userFeatures = sparkSession.sql(`
+  SELECT 
+    user_id,
+    COUNT(DISTINCT artist) as artist_diversity,
+    COUNT(*) as total_plays,
+    AVG(song_duration) as avg_song_duration,
+    COUNT(DISTINCT CAST(play_time AS DATE)) as days_active,
+    SUM(CASE WHEN hour(play_time) BETWEEN 22 AND 6 THEN 1 ELSE 0 END) as night_plays
+  FROM listening_history
+  WHERE date >= current_date() - INTERVAL 30 DAYS
+  GROUP BY user_id
+`);
 
-# K-Means clustering
-from pyspark.ml.clustering import KMeans
-from pyspark.ml.feature import VectorAssembler
+// K-Means clustering
+const { KMeans } = spark.ml.clustering;
+const { VectorAssembler } = spark.ml.feature;
 
-assembler = VectorAssembler(
-    inputCols=["artist_diversity", "total_plays", "avg_song_duration", 
-               "days_active", "night_plays"],
-    outputCol="features"
-)
+const assembler = new VectorAssembler({
+  inputCols: ["artist_diversity", "total_plays", "avg_song_duration", 
+             "days_active", "night_plays"],
+  outputCol: "features"
+});
 
-feature_vectors = assembler.transform(user_features)
+const featureVectors = assembler.transform(userFeatures);
 
-kmeans = KMeans(k=5, seed=42)
-model = kmeans.fit(feature_vectors)
+const kmeans = new KMeans({
+  k: 5,
+  seed: 42
+});
 
-segments = model.transform(feature_vectors)
+const model = kmeans.fit(featureVectors);
+const segments = model.transform(featureVectors);
 
-# Analyze segments
-segments.groupBy("prediction").agg(
-    avg("total_plays").alias("avg_plays"),
-    avg("artist_diversity").alias("avg_diversity")
-).show()
+// Analyze segments
+segments.groupBy("prediction").agg({
+  "total_plays": "avg",
+  "artist_diversity": "avg"
+}).withColumnRenamed("avg(total_plays)", "avg_plays")
+  .withColumnRenamed("avg(artist_diversity)", "avg_diversity")
+  .show();
 ```
 
 ## Summary
